@@ -57,7 +57,7 @@ BOUNTY_POINTS_LOW_CLEAR_T2 = 4
 BOUNTY_POINTS_LOW_CLEAR_T3 = 8
 BOUNTY_POINTS_LOW_CLEAR_T4 = 16
 BOUNTY_POINTS_LOW_CLEAR_T5PLUS = 32
-BOUNTY_POINTS_UNCLEARED_OBJECTIVE = 10
+BOUNTY_POINTS_UNCLEARED = 10
 
 
 def pull():
@@ -92,9 +92,7 @@ def extract():
         "type": "Potential" # or "Low Clear" or "Uncleared"
         "lowClearTier": 1 # or 2, 3, 4, 5, null. 5 == "tier 5 or above"
         "gameName": "Celeste" # or whatever
-        "ceId": "1f1f23e6-ee09-4029-8973-b6ab79552e17" # or whatever, or null if it's not an uncleared
-        "objectiveName": "Thunder and Lightning (UNCLEARED)" # or whatever, or null if it's not an uncleared
-        "objectiveCeId": uuidv4
+        "ceId": "1f1f23e6-ee09-4029-8973-b6ab79552e17" # or whatever, or null if it's a potential
     }
     """
     import json
@@ -122,9 +120,7 @@ def extract():
             "lowClearTier": None,
             "gameName": u["gameName"],
             "ceId": u["gameCeId"],
-            "objectiveName": u["objectiveName"],
-            "objectiveCeId": u["objectiveCeId"],
-            "objectiveType": u["type"],  # "Primary" or "Secondary"
+            "unclearedTypes": u["unclearedTypes"],
         })
     print(f"  Transformed {len(results)} uncleareds.")
 
@@ -179,8 +175,6 @@ def extract():
                 "lowClearTier": None,
                 "gameName": str(game_name),
                 "ceId": None,
-                "objectiveName": None,
-                "objectiveCeId": None,
             })
         print(f"  {category}: {len(results) - before} potentials")
 
@@ -220,8 +214,6 @@ def extract():
                 "lowClearTier": tier,
                 "gameName": game_name,
                 "ceId": ce_game_id,
-                "objectiveName": None,
-                "objectiveCeId": None,
             })
         print(f"  T{tier} Low Clears: {len(results) - before}")
 
@@ -360,9 +352,9 @@ def output():
         price = price_str(e)
         bp = e.get("bountyPoints", "X")
         if e['type'] == 'Uncleared':
-            name = f'{e['objectiveType'][0]}O \'{e['objectiveName']}\' - {e['gameName']}'
+            label = "PO" if e.get("unclearedType") == "Primary" else "SO"
             url = ce_url(e['ceId'])
-            return f"{name} - {bp} bp - {price} - {url}"
+            return f"{label}: {e['gameName']} - {bp} bp - {price} - {url}"
         if e['type'] == 'Low Clear':
             url = ce_url(e['ceId'])
             return f"{e['gameName']} - {bp} bp - {price} - {url}"
@@ -432,11 +424,10 @@ def output():
 def verify_extract():
     """
     Goes through sheet.json and checks for correctness.
-    - No "uncleared" should have a null objectiveName
     - No "uncleared" should have a null ceId
     - No "low clear" should have a null lowClearTier
-    - All three of these's inverses should also be true. Every potential should have
-      a null ceId and objectiveName.
+    - Both of these's inverses should also be true. Every potential should have
+      a null ceId.
     """
 
 def select():
@@ -467,8 +458,8 @@ def select():
     - CATEGORY_LOW_CLEAR_T3 low clears in tier 3
     - CATEGORY_LOW_CLEAR_T4 low clears in tier 4
     - CATEGORY_LOW_CLEAR_T5PLUS low clears in tier 5+
-    - CATEGORY_UNCLEARED_PO uncleared POs
-    - CATEGORY_UNCLEARED_SO uncleared SOs
+    - CATEGORY_UNCLEARED_PO games with an uncleared PO
+    - CATEGORY_UNCLEARED_SO games with an uncleared SO (a game can't be picked for both)
 
     This selection should be relegated to selection.json.
     """
@@ -529,15 +520,24 @@ def select():
             else:
                 print(f"    {n} T{tier} low clears")
 
+        picked_uncleareds: set[str] = set()
         for obj_type, count, label in [
             ("Primary", CATEGORY_UNCLEARED_PO, "PO"),
             ("Secondary", CATEGORY_UNCLEARED_SO, "SO"),
         ]:
-            pool = [e for e in cat if e["type"] == "Uncleared" and e.get("objectiveType") == obj_type]
+            pool = [
+                e for e in cat
+                if e["type"] == "Uncleared"
+                and obj_type in e.get("unclearedTypes", [])
+                and e["ceId"] not in picked_uncleareds
+            ]
             n = min(count, len(pool))
-            selected.extend(random.sample(pool, n))
+            for e in random.sample(pool, n):
+                e["unclearedType"] = obj_type  # which one it was picked as, for output
+                picked_uncleareds.add(e["ceId"])
+                selected.append(e)
             if n < count:
-                print(f"    WARNING: uncleared {label}: only {n}/{count} available")
+                print(f"    WARNING: uncleared {label}s: only {n}/{count} available")
             else:
                 print(f"    {n} uncleared {label}s")
 
@@ -560,7 +560,7 @@ def select():
                     case 5:
                         bp = BOUNTY_POINTS_LOW_CLEAR_T5PLUS
             case "Uncleared":
-                bp = BOUNTY_POINTS_UNCLEARED_OBJECTIVE
+                bp = BOUNTY_POINTS_UNCLEARED
             case "Potential":
                 bp = BOUNTY_POINTS_POTENTIAL
         entry["bountyPoints"] = bp
@@ -688,22 +688,22 @@ def selectdata():
 
 def __pull_uncleareds() -> list[dict]:
     """
-    Pulls all uncleared POs and SOs from the site and returns them in this object:
+    Pulls every game that has at least one uncleared PO or SO, one entry per game:
     {
-        "type": "Primary" # or "Secondary"
         "gameCeId": "ee810c8f-d5c8-4a4b-9200-b89ea4a83901" # or any uuidv4
         "gameName": "Jupiter Hell"
-        "objectiveCeId": "330648e3-d94e-47ae-b3e5-d5dc17385896" # or any uuidv4
-        "objectiveName": "Eternal Doom (UNCLEARED)" # or any string
+        "category": "Action"
+        "unclearedTypes": ["Primary", "Secondary"] # which kinds of uncleared objectives the game has
     }
     We can do this by going through /api/objectives using the ?orderBy=points metric.
     - limit is default 100 which is fine.
     - then we increase the offset
     - discard any COs
     - and stop once we find one with points > 0.
-    We should also store this as uncleareds.json
+    Nothing about the objectives themselves is kept beyond PO/SO. Stored as uncleareds.json.
     """
     import json
+    import random
 
     BASE = "https://cedb.me/api"
 
@@ -722,15 +722,24 @@ def __pull_uncleareds() -> list[dict]:
     games_resp = requests.get(f"{BASE}/games")
     games_resp.raise_for_status()
     all_games = games_resp.json()
-    game_cache: dict[str, dict] = {
-        g["id"]: {
+
+    def _categories(g: dict) -> list[str]:
+        # gameCategories is the current field; genreId is a legacy single value that's often stale
+        cats = sorted(g.get("gameCategories") or [], key=lambda c: c.get("order", 0))
+        ids = [c["genreId"] for c in cats] or [g.get("genreId", "")]
+        return [GENRE_TO_CATEGORY[i] for i in ids if i in GENRE_TO_CATEGORY]
+
+    game_cache: dict[str, dict] = {}
+    for g in all_games:
+        categories = _categories(g)
+        game_cache[g["id"]] = {
             "name": g["name"],
             "platform": g.get("platform"),
             "platformId": g.get("platformId"),
-            "category": GENRE_TO_CATEGORY.get(g.get("genreId", "")),
+            # multi-category games get one of their categories at random so they only appear once
+            "category": random.choice(categories) if categories else None,
+            "categories": categories,
         }
-        for g in all_games
-    }
     game_name_cache: dict[str, str] = {gid: info["name"] for gid, info in game_cache.items()}
     print(f"  Loaded {len(game_cache)} games.")
 
@@ -738,7 +747,8 @@ def __pull_uncleareds() -> list[dict]:
         json.dump(game_cache, f, indent=2)
     print("  Saved cedb_games.json.")
 
-    results = []
+    # dict keyed by game id so a game with several uncleared objectives only shows up once
+    results: dict[str, dict] = {}
     offset = 0
 
     print("Fetching objectives...")
@@ -763,40 +773,44 @@ def __pull_uncleareds() -> list[dict]:
                 print(f"  WARNING: gameId {game_id} not found in /api/games (objective: {obj['name']})")
                 continue
 
-            results.append({
-                "type": obj["type"].capitalize(),
+            obj_type = obj["type"].capitalize()
+            if obj_type not in ("Primary", "Secondary"):  # e.g. site-achievements on the CE meta game
+                continue
+
+            entry = results.setdefault(game_id, {
                 "gameCeId": game_id,
                 "gameName": game_name_cache[game_id],
                 "category": game_cache[game_id].get("category"),
-                "objectiveCeId": obj["id"],
-                "objectiveName": obj["name"],
+                "unclearedTypes": [],
             })
+            if obj_type not in entry["unclearedTypes"]:
+                entry["unclearedTypes"].append(obj_type)
 
-        print(f"  Fetched offset {offset}-{offset + len(objectives) - 1}: {len(results)} uncleareds so far...")
+        print(f"  Fetched offset {offset}-{offset + len(objectives) - 1}: {len(results)} games with uncleareds so far...")
 
         if done:
             break
 
         offset += 100
 
+    games = list(results.values())
     with open("uncleareds.json", "w") as f:
-        json.dump(results, f, indent=2)
+        json.dump(games, f, indent=2)
 
-    pos = sum(1 for r in results if r["type"] == "Primary")
-    sos = sum(1 for r in results if r["type"] == "Secondary")
-    unique_games = len({r["gameCeId"] for r in results})
-    print(f"Done. Pulled {len(results)} uncleareds: {pos} POs and {sos} SOs from {unique_games} games. Stored in uncleareds.json.")
+    po_games = sum(1 for g in games if "Primary" in g["unclearedTypes"])
+    so_games = sum(1 for g in games if "Secondary" in g["unclearedTypes"])
+    print(f"Done. Pulled {len(games)} games with uncleared objectives ({po_games} with POs, {so_games} with SOs). Stored in uncleareds.json.")
 
-    return results
+    return games
 
 
 def totalinfo():
     """
     Prints a tally of totalinfo.json broken down by category and type:
     - Steam potentials
-    - Low clears per tier (T1–T5+)
-    - Uncleared POs
-    - Uncleared SOs
+    - Low clears per tier (T1-T5+)
+    - Games with uncleared POs
+    - Games with uncleared SOs
     """
     import json
 
@@ -810,10 +824,10 @@ def totalinfo():
         cat = [e for e in entries if e["category"] == category]
         steam_pots = sum(1 for e in cat if e["type"] == "Potential" and e["platform"] == "steam")
         lc = {t: sum(1 for e in cat if e["type"] == "Low Clear" and e["lowClearTier"] == t) for t in TIERS}
-        pos = sum(1 for e in cat if e["type"] == "Uncleared" and e.get("objectiveType") == "Primary")
-        sos = sum(1 for e in cat if e["type"] == "Uncleared" and e.get("objectiveType") == "Secondary")
+        pos = sum(1 for e in cat if e["type"] == "Uncleared" and "Primary" in e.get("unclearedTypes", []))
+        sos = sum(1 for e in cat if e["type"] == "Uncleared" and "Secondary" in e.get("unclearedTypes", []))
         lc_str = "  ".join(f"T{t}:{lc[t]}" for t in TIERS)
-        print(f"{category}: {steam_pots} potentials  {lc_str}  {pos} POs  {sos} SOs")
+        print(f"{category}: {steam_pots} potentials  {lc_str}  {pos} PO games  {sos} SO games")
 
 
 match(sys.argv[1]):
@@ -838,7 +852,7 @@ match(sys.argv[1]):
     case "all":
         print("This will run the full pipeline in order:")
         print("  1. pull      — download potentials.xlsx and retro.xlsx from Google Sheets")
-        print("  2. pullce    — fetch all uncleared POs/SOs and game data from cedb.me")
+        print("  2. pullce    — fetch games with uncleared POs/SOs and game data from cedb.me")
         print("  3. extract   — parse spreadsheets + CEDB data into totalinfo.json,")
         print("                 check every Steam game for unlisted status (makes Steam API calls)")
         print("  4. select    — randomly pick games per category from totalinfo.json → selection.json")
