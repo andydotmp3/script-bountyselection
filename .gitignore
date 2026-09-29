@@ -182,6 +182,7 @@ cython_debug/
 
 *.json
 !unlistedgames.json
+!listedgames.json
 *.xlsx
 *.txt
 !requirements.txt

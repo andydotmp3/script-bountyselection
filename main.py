@@ -66,6 +66,39 @@ LOW_CLEAR_MAX_CLEARS = 5  # games with this many clears or fewer count as low cl
 CLOWN_TOWN = '09f100aa-caa7-4154-a224-1c3e9277eea4'
 
 
+def _steam_store_status(app_ids: list[str]) -> dict[str, str]:
+    """
+    Classifies Steam app IDs as "paid", "free", or "unlisted" (not free and can't be bought).
+    appdetails can only batch price_overview, which looks the same for free and unlisted games,
+    so this uses IStoreBrowseService/GetItems instead, which takes up to ~250 IDs per request.
+    """
+    import json
+
+    BATCH = 200
+    statuses: dict[str, str] = {}
+    for i in range(0, len(app_ids), BATCH):
+        batch = app_ids[i:i + BATCH]
+        input_json = {
+            "ids": [{"appid": int(app_id)} for app_id in batch],
+            "context": {"language": "english", "country_code": "US"},
+        }
+        resp = requests.get(
+            "https://api.steampowered.com/IStoreBrowseService/GetItems/v1/",
+            params={"input_json": json.dumps(input_json)},
+        )
+        resp.raise_for_status()
+        items = {str(it.get("appid")): it for it in resp.json().get("response", {}).get("store_items", [])}
+        for app_id in batch:
+            item = items.get(app_id, {})
+            if item.get("is_free"):
+                statuses[app_id] = "free"
+            elif item.get("best_purchase_option"):
+                statuses[app_id] = "paid"
+            else:
+                statuses[app_id] = "unlisted"
+    return statuses
+
+
 def pull():
     """
     This function pulls the .xlsx files for both the POTENTIALS_SHEET link and the RETRO_SHEET link
@@ -228,13 +261,25 @@ def extract():
             existing_unlisted = json.load(f)
     known_unlisted_pids: set[str] = {u["platformId"] for u in existing_unlisted}
 
+    # games already confirmed as listed (paid or free) aren't rechecked. selectdata still
+    # rechecks whatever gets picked, so a game delisted later is still caught there.
+    listed_path = "listedgames.json"
+    existing_listed: list[dict] = []
+    if os.path.exists(listed_path):
+        with open(listed_path) as f:
+            existing_listed = json.load(f)
+    known_listed_pids: set[str] = {u["platformId"] for u in existing_listed}
+
     all_steam_ids = {r["platformId"] for r in results if r.get("platform") == "steam" and r.get("platformId")}
-    unchecked_ids = list(all_steam_ids - known_unlisted_pids)
+    unchecked_ids = list(all_steam_ids - known_unlisted_pids - known_listed_pids)
 
     if known_unlisted_pids & all_steam_ids:
         print(f"  Skipping {len(known_unlisted_pids & all_steam_ids)} already-known unlisted game(s).")
+    if known_listed_pids & all_steam_ids:
+        print(f"  Skipping {len(known_listed_pids & all_steam_ids)} already-known listed game(s).")
 
     unlisted_ids: set[str] = set(known_unlisted_pids & all_steam_ids)
+    pid_to_name = {r["platformId"]: r["gameName"] for r in results if r.get("platformId")}
 
     if unchecked_ids:
         print(f"Checking {len(unchecked_ids)} Steam app IDs for unlisted status...")
@@ -260,28 +305,21 @@ def extract():
 
         if no_price_ids:
             print(f"  Second-pass: checking {len(no_price_ids)} no-price entries (free vs unlisted)...")
-            for app_id in no_price_ids:
-                resp = requests.get(
-                    "https://store.steampowered.com/api/appdetails",
-                    params={"appids": app_id, "cc": "us"},
-                )
-                resp.raise_for_status()
-                result = resp.json().get(app_id, {})
-                if not result.get("success"):
+            for app_id, status in _steam_store_status(no_price_ids).items():
+                if status == "unlisted":
+                    print(f"    {pid_to_name.get(app_id, app_id)}: unlisted")
                     unlisted_ids.add(app_id)
-                    continue
-                app_data = result.get("data")
-                if not isinstance(app_data, dict):
-                    unlisted_ids.add(app_id)
-                    continue
-                if not app_data.get("is_free") and not app_data.get("package_groups"):
-                    print(f"    {app_data.get('name', app_id)}: unlisted")
-                    unlisted_ids.add(app_id)
-                time.sleep(0.5)
+
+        newly_listed = [pid for pid in unchecked_ids if pid not in unlisted_ids]
+        if newly_listed:
+            for pid in newly_listed:
+                existing_listed.append({"platformId": pid, "gameName": pid_to_name.get(pid, "Unknown")})
+            with open(listed_path, "w") as f:
+                json.dump(existing_listed, f, indent=2)
+            print(f"  {len(newly_listed)} listed game(s) saved to listedgames.json.")
 
         new_unlisted = unlisted_ids - known_unlisted_pids
         if new_unlisted:
-            pid_to_name = {r["platformId"]: r["gameName"] for r in results if r.get("platformId")}
             for pid in new_unlisted:
                 existing_unlisted.append({"platformId": pid, "gameName": pid_to_name.get(pid, "Unknown")})
             with open(unlisted_path, "w") as f:
@@ -623,34 +661,19 @@ def selectdata():
         if i + BATCH < len(app_ids):
             time.sleep(1)
 
+    # Build a name lookup for unlisted entries
+    pid_to_name = {e["platformId"]: e["gameName"] for e in steam_entries}
+
     # Second pass: classify no-price entries as free or unlisted
-    # Unlisted = success but package_groups is empty and not free
     unlisted_ids: set[str] = set()
     if no_price_ids:
         print(f"  Checking {len(no_price_ids)} no-price entries (free vs unlisted)...")
-        for app_id in no_price_ids:
-            resp = requests.get(
-                "https://store.steampowered.com/api/appdetails",
-                params={"appids": app_id, "cc": "us"},
-            )
-            resp.raise_for_status()
-            result = resp.json().get(app_id, {})
-            if not result.get("success"):
+        for app_id, status in _steam_store_status(no_price_ids).items():
+            if status == "free":
+                print(f"    {pid_to_name.get(app_id, app_id)}: free, skipping price")
+            elif status == "unlisted":
+                print(f"    {pid_to_name.get(app_id, app_id)}: unlisted")
                 unlisted_ids.add(app_id)
-                continue
-            app_data = result.get("data")
-            if not isinstance(app_data, dict):
-                unlisted_ids.add(app_id)
-                continue
-            if app_data.get("is_free"):
-                print(f"    {app_data.get('name', app_id)}: free, skipping price")
-            elif not app_data.get("package_groups"):
-                print(f"    {app_data.get('name', app_id)}: unlisted")
-                unlisted_ids.add(app_id)
-            time.sleep(0.5)
-
-    # Build a name lookup for unlisted entries
-    pid_to_name = {e["platformId"]: e["gameName"] for e in steam_entries}
 
     # Load existing unlistedgames.json and merge
     unlisted_path = "unlistedgames.json"
