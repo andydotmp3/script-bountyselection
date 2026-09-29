@@ -59,6 +59,12 @@ BOUNTY_POINTS_LOW_CLEAR_T4 = 16
 BOUNTY_POINTS_LOW_CLEAR_T5PLUS = 32
 BOUNTY_POINTS_UNCLEARED = 10
 
+# -- low clears -----------------
+LOW_CLEAR_MAX_CLEARS = 5  # games with this many clears or fewer count as low clears
+
+# CE's joke game, never selected
+CLOWN_TOWN = '09f100aa-caa7-4154-a224-1c3e9277eea4'
+
 
 def pull():
     """
@@ -132,14 +138,6 @@ def extract():
                 pass
         return None
 
-    def _cedb_game_id(url: str | None) -> str | None:
-        if url and "cedb.me/game/" in url:
-            try:
-                return url.rstrip("/").split("/")[-1]
-            except IndexError:
-                pass
-        return None
-
     # ── potentials.xlsx ──────────────────────────────────────────────────────────
     print("Reading potentials.xlsx...")
     wb = openpyxl.load_workbook("potentials.xlsx", data_only=True)
@@ -194,43 +192,30 @@ def extract():
         print(f"  {category}: {len(results) - before} potentials ({skipped_status} skipped for status)")
 
     # ── Low clears (T1–T5+) ─────────────────────────────────────────────────────
-    LOW_CLEAR_TIERS = [
-        ("T1 Low Cleared", 1),
-        ("T2 Low Cleared", 2),
-        ("T3 Low Cleared", 3),
-        ("T4 Low Cleared", 4),
-        ("T5+ Low Cleared", 5),
-    ]
-    for sheet_name, tier in LOW_CLEAR_TIERS:
-        ws = wb[sheet_name]
-        before = len(results)
-        for row in ws.iter_rows(min_row=2):
-            name_cell = row[0]
-            if name_cell.value is None:
-                continue
-            game_name = str(name_cell.value).replace(" :: CE", "").strip()
-            category = row[2].value
-            category = category if category != "First Person" else "First-Person"
-            ce_game_id = _cedb_game_id(name_cell.hyperlink.target if name_cell.hyperlink else None)
-            if not ce_game_id:
-                print(f"  WARNING: No CEDB link for low clear '{game_name}' (T{tier}). Skipping!")
-                continue
-            if ce_game_id not in cedb_games:
-                print(f"  WARNING: CEDB game {ce_game_id} ('{game_name}', T{tier}) not found in /api/games. Skipping!")
-                continue
-            game_info = cedb_games[ce_game_id]
-            platform = game_info.get("platform", "steam")
-            platform_id = game_info.get("platformId")
-            results.append({
-                "platform": platform,
-                "platformId": platform_id,
-                "category": category,
-                "type": "Low Clear",
-                "lowClearTier": tier,
-                "gameName": game_name,
-                "ceId": ce_game_id,
-            })
-        print(f"  T{tier} Low Clears: {len(results) - before}")
+    # any CEDB game with LOW_CLEAR_MAX_CLEARS or fewer clears. tier 0 (untiered) is skipped,
+    # and tiers 5+ are grouped together as tier 5.
+    before = len(results)
+    for ce_game_id, game_info in cedb_games.items():
+        tier = game_info.get("tier")
+        completed = game_info.get("completed")
+        if not tier or completed is None or completed > LOW_CLEAR_MAX_CLEARS:
+            continue
+        if ce_game_id == CLOWN_TOWN or game_info.get("category") is None:
+            continue
+        results.append({
+            "platform": game_info.get("platform", "steam"),
+            "platformId": game_info.get("platformId"),
+            "category": game_info["category"],
+            "type": "Low Clear",
+            "lowClearTier": min(tier, 5),
+            "gameName": game_info["name"],
+            "ceId": ce_game_id,
+        })
+    low_clears = results[before:]
+    tier_counts = "  ".join(
+        f"T{t}{'+' if t == 5 else ''}: {sum(1 for r in low_clears if r['lowClearTier'] == t)}" for t in range(1, 6)
+    )
+    print(f"  Low clears: {len(low_clears)} ({tier_counts})")
 
     # ── Steam unlisted check ─────────────────────────────────────────────────
     import time
@@ -722,8 +707,6 @@ def __pull_uncleareds() -> list[dict]:
 
     BASE = "https://cedb.me/api"
 
-    CLOWN_TOWN = '09f100aa-caa7-4154-a224-1c3e9277eea4'
-
     GENRE_TO_CATEGORY: dict[str, str] = {
         "4d43349a-43a8-4755-9d52-41ece63ec5b1": "Action",
         "ec499226-0913-4db1-890e-093b366bcb3c": "Arcade",
@@ -754,6 +737,8 @@ def __pull_uncleareds() -> list[dict]:
             # multi-category games get one of their categories at random so they only appear once
             "category": random.choice(categories) if categories else None,
             "categories": categories,
+            "tier": g.get("tier"),
+            "completed": (g.get("completion") or {}).get("completed"),
         }
     game_name_cache: dict[str, str] = {gid: info["name"] for gid, info in game_cache.items()}
     print(f"  Loaded {len(game_cache)} games.")
