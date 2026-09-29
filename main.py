@@ -145,6 +145,8 @@ def extract():
     wb = openpyxl.load_workbook("potentials.xlsx", data_only=True)
 
     STEAM_CATEGORIES = ["Action", "Arcade", "Bullet Hell", "First Person", "Platformer", "Strategy"]
+    # only potentials with one of these statuses are kept ("" = blank); anything else is skipped
+    ALLOWED_STATUSES = {"", "0", "1", "2"}
 
     for sheet_name in STEAM_CATEGORIES:
         ws = wb[sheet_name]
@@ -157,11 +159,24 @@ def extract():
             if r[0].value is not None and "Game Title" in str(r[0].value)
         )
 
+        # Strategy's status column is E instead of D, so find it by header
+        status_idx = next(
+            i for i, c in enumerate(rows[header_idx])
+            if c.value is not None and str(c.value).strip().lower() == "status"
+        )
+
         before = len(results)
+        skipped_status = 0
         for row in rows[header_idx + 1:]:
             name_cell = row[0]
             game_name = name_cell.value
             if game_name is None:
+                continue
+            status = row[status_idx].value
+            if isinstance(status, float) and status.is_integer():
+                status = int(status)
+            if ("" if status is None else str(status).strip()) not in ALLOWED_STATUSES:
+                skipped_status += 1
                 continue
             platform_id = _steam_app_id(name_cell.hyperlink.target if name_cell.hyperlink else None)
             if platform_id is None:
@@ -176,7 +191,7 @@ def extract():
                 "gameName": str(game_name),
                 "ceId": None,
             })
-        print(f"  {category}: {len(results) - before} potentials")
+        print(f"  {category}: {len(results) - before} potentials ({skipped_status} skipped for status)")
 
     # ── Low clears (T1–T5+) ─────────────────────────────────────────────────────
     LOW_CLEAR_TIERS = [
