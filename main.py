@@ -422,7 +422,7 @@ def output():
 
     for i, msg in enumerate(messages, 1):
         filename = f"output{i:02d}.txt"
-        with open(filename, "w") as f:
+        with open(filename, "w", encoding="utf-8") as f:
             f.write(msg)
         print(f"  {filename}: {len(msg)} chars")
 
